@@ -1,0 +1,17 @@
+# vfdsvc — userspace front-display driver for Amlogic Android TV boxes
+# (7-segment "clock" LED displays). No kernel module — pure sysfs bit-banging.
+
+# Line endings
+* text=auto
+*.sh     text eol=lf
+*.c      text eol=lf
+*.conf   text eol=lf
+*.bat    text eol=crlf
+*.cmd    text eol=crlf
+*.rc     text eol=lf
+*.yml    text eol=lf
+*.md     text eol=lf
+
+# Never ship host junk
+dist/**  -text
+src/*.o
