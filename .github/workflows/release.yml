@@ -23,6 +23,9 @@ jobs:
       - name: Build vfdsvc-arm64 (static)
         run: make arm64
 
+      - name: Fix dist/ permissions (docker wrote as root)
+        run: sudo chmod -R a+rwX dist
+
       - name: Smoke
         run: |
           file dist/vfdsvc-armv7 dist/vfdsvc-arm64
