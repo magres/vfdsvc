@@ -12,6 +12,8 @@ jobs:
   build:
     name: cross-build (docker ubuntu:18.04)
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
         with:
