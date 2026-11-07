@@ -1,0 +1,121 @@
+#!/system/bin/sh
+# vfdsvc bootstrap (installed as /system/bin/sys_leds by the vfdsvc installer).
+#
+# What it does at boot:
+#   1) Reads display GPIO pins from /system/etc/vfdsvc.conf;
+#   2) Frees the pins if some built-in driver claims them (e.g. the slimBOX
+#      "i2c_b" controller on Tanix TX92) by unbinding its driver;
+#   3) Starts /system/bin/vfdsvc (the actual display daemon) and restarts it
+#      if it ever dies;
+#   4) Reproduces the legacy red/blue power LED behavior (no-op when the
+#      /sys/class/leds/blue|red nodes are absent, e.g. on slimBOX TX92).
+#
+# NOTE: shell is mksh on the device; lists are parsed key-by-key because
+#       word-splitting of "bank pin" pairs will break under mksh.
+
+LOG=/data/local/tmp/vfdsvc_boot.log
+CONF=/system/etc/vfdsvc.conf
+DAEMON=/system/bin/vfdsvc
+
+say() { echo "$(date) [vfdsvc-bootstrap] $*" >> "$LOG"; }
+
+# confval KEY -> "bank,pin,flag" string (dequoted) or empty
+confval() {
+	grep -E "^[[:space:]]*$1" "$CONF" 2>/dev/null | head -1 | sed 's/.*=//' | tr -d "'\" "
+}
+
+pin_of() {
+	key=$1
+	val=$(confval "$key")
+	[ -n "$val" ] || return 1
+	echo "$val" | cut -d, -f2
+}
+
+# sysfs export number for KEY = <gpiochip base of the bank> + pin
+sysfs_num_key() {
+	key=$1
+	val=$(confval "$key")
+	[ -n "$val" ] || return 1
+	bank=$(echo "$val" | cut -d, -f1)
+	pin=$(echo "$val" | cut -d, -f2)
+	case "$bank" in
+		0) label=periphs-banks ;;
+		1) label=aobus-banks ;;
+		*) say "unknown gpio bank $bank for $key"; return 1 ;;
+	esac
+	for d in /sys/class/gpio/gpiochip*; do
+		[ -e "$d/label" ] || continue
+		if [ "$(cat "$d/label" 2>/dev/null)" = "$label" ]; then
+			echo $(( $(cat "$d/base" 2>/dev/null) + pin ))
+			return 0
+		fi
+	done
+	say "gpiochip $label not found"
+	return 1
+}
+
+# unbind any driver that claims pin N
+free_pin() {
+	pin=$1
+	[ -n "$pin" ] || return 0
+	for d in /sys/kernel/debug/pinctrl/*/pinmux-pins; do
+		[ -e "$d" ] || continue
+		owner=$(grep -E "^pin ${pin} \(" "$d" 2>/dev/null | head -1 |
+			sed 's/^[^:]*: *//' | awk '{print $1}')
+		case "$owner" in
+			""|"(MUX"|"pin") continue ;;
+		esac
+		if [ -e "/sys/bus/platform/devices/$owner/driver/unbind" ]; then
+			echo "$owner" > "/sys/bus/platform/devices/$owner/driver/unbind" 2>/dev/null \
+				&& say "unbound $owner (was claiming display pin $pin)"
+		fi
+	done
+}
+
+say "bootstrap start"
+mount -t debugfs none /sys/kernel/debug 2>/dev/null
+
+tries=0
+while [ "$tries" -lt 30 ]; do
+	good=1
+	for key in vfd_gpio_clk vfd_gpio_dat vfd_gpio_stb; do
+		for pin in $(free_pin "$(pin_of "$key")"); do :; done
+		good=1
+	done
+	# success criterion: export-unexport roundtrip works for all 3 pins
+	ok=1
+	for key in vfd_gpio_clk vfd_gpio_dat vfd_gpio_stb; do
+		n=$(sysfs_num_key "$key") || { ok=0; break; }
+		echo "$n" > /sys/class/gpio/export 2>/dev/null || { ok=0; break; }
+		echo "$n" > /sys/class/gpio/unexport 2>/dev/null
+	done
+	[ "$ok" = "1" ] && break
+	sleep 2
+	tries=$((tries+1))
+done
+say "pins prepared (tries=$tries)"
+
+# legacy LED behavior (no-op if the nodes are absent, like the stock script)
+(
+sleep 5
+while true; do
+	wake=$(cat /sys/power/wake_lock 2>/dev/null | sed '/PowerManagerService.Display/!d')
+	if [ -n "$wake" ]; then
+		echo 1 > /sys/class/leds/blue/brightness 2>/dev/null
+		echo 0 > /sys/class/leds/red/brightness 2>/dev/null
+	else
+		echo 0 > /sys/class/leds/blue/brightness 2>/dev/null
+		echo 1 > /sys/class/leds/red/brightness 2>/dev/null
+	fi
+	sleep 5
+done
+) &
+
+killall vfdsvc 2>/dev/null
+sleep 1
+
+while true; do
+	"$DAEMON" -c "$CONF"
+	say "daemon exited rc=$?, restarting in 5s"
+	sleep 5
+done

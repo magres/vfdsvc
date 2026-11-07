@@ -1,0 +1,14 @@
+dist/
+build-*.log
+*.log
+*.o
+*.ko
+*.orig
+.DS_Store
+
+# adb binaries (must NOT be committed; fetched at build/release time
+# from official Android platform-tools — see tooling/README.md)
+tooling/windows/*
+tooling/macos/*
+tooling/linux/*
+tooling/platform-tools/
