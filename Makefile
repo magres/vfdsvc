@@ -11,7 +11,7 @@ all: armv7 arm64
 armv7:
 	docker run --rm -v "$(CURDIR)":/v $(IMG) bash -ec '\
 	  apt-get update -qq && \
-	  apt-get install -y -qq --no-install-recommends $(PKGS) >/dev/null && cd /v && \
+	  apt-get install -y -qq --no-install-recommends $(PKGS) >/dev/null && cd /v && mkdir -p /v/dist && \
 	  arm-linux-gnueabihf-gcc -s -static -O2 -Wall -Wextra \
 	    -DVFD_VERSION="\"vfdsvc $(VERSION)\"" \
 	    -o /v/dist/vfdsvc-armv7 src/vfdsvc.c && \
@@ -20,7 +20,7 @@ armv7:
 arm64:
 	docker run --rm -v "$(CURDIR)":/v $(IMG) bash -ec '\
 	  apt-get update -qq && \
-	  apt-get install -y -qq --no-install-recommends $(PKGS) >/dev/null && cd /v && \
+	  apt-get install -y -qq --no-install-recommends $(PKGS) >/dev/null && cd /v && mkdir -p /v/dist && \
 	  aarch64-linux-gnu-gcc -s -static -O2 -Wall -Wextra \
 	    -DVFD_VERSION="\"vfdsvc $(VERSION)\"" \
 	    -o /v/dist/vfdsvc-arm64 src/vfdsvc.c && \
