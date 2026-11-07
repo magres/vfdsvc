@@ -136,6 +136,7 @@ vfdsvc некуда.
 | Bluetooth | `bt_source=rfkill` (или `off`) |
 | Fallback на eth1/wlan1 | `net_fallback=on/off` |
 | Яркость / яркость сна | `brightness`, `standby` (`dim/off/keep`), `standby_brightness` |
+| Детектор сна | `awake_poll=2` (сек): 1) fb0-blank, 2) опрос `dumpsys power` (на slimBOX wake_lock врёт), 3) wake-lock; `0` = отключить опрос |
 | Часы | `tz_offset` (ручное), `time_format` (12/24/auto) |
 
 Отправная точка для нового бокса: готовый конфиг своей модели из базы
@@ -193,6 +194,9 @@ vfdsvc некуда.
 
 ## История
 
+- **0.1.3** — починил приглушение во сне: на slimBOX wake_lock не снимает
+  `PowerManagerService.Display`, поэтому демон не видел «сна». Уровни детекта:
+  fb0-blank → опрос `dumpsys power` (`awake_poll=`) → wake-lock (как раньше).
 - **0.1.2** — иконки стали полноценными и настраиваемыми: play по трем датчикам
   (видеодекодер/звук/wake-lock — починил «play» на slimBOX), пауза видео,
   будильник (Google Clock), Bluetooth (для боксов с такой меткой), fallback на

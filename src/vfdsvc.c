@@ -551,16 +551,50 @@ static void display_all_segments(int secs)
 
 /* ---------------- icons state ------------------------------------------ */
 
+/* Sleep detection, in priority order:
+ *  1) framebuffer blank flag (/sys/class/graphics/fb0/blank == 1..4)
+ *  2) cached "dumpsys power" wakefulness probe (wake_lock on this firmware
+ *     keeps PowerManagerService.Display even when the screen is off)
+ *  3) legacy wake_lock signal (Display lock disappears when asleep)      */
+static time_t awake_poll_next = 0;
+static int awake_poll_secs = 2;		/* dumpsys probe cadence, 0 = off */
+static int awake_cached = 1;
+static int awake_probed = 0;
+
+static int fb_blank_asleep(void)
+{
+	char buf[32];
+	int n = read_head("/sys/class/graphics/fb0/blank", buf, (int)sizeof(buf));
+	if (n <= 0) return -1;			/* file absent / write-only: unknown */
+	{
+		int v = atoi(buf);
+		if (v <= 0) return 0;			/* 0 = screen active */
+	}
+	return 1;					/* 1..4 = blanked (4 = POWERDOWN) */
+}
+
 static int screen_awake(void)
 {
-	char buf[4096];
-	int f, r = 0;
-	f = open("/sys/power/wake_lock", O_RDONLY);
-	if (f < 0) return 2;	/* unknown: assume awake */
-	r = (int)read(f, buf, sizeof(buf) - 1);
-	close(f);
-	buf[r > 0 ? r : 0] = 0;
-	return strstr(buf, "PowerManagerService.Display") != NULL;
+	int b = fb_blank_asleep();
+	if (b >= 0) return b ? 0 : 1;
+	if (awake_poll_secs > 0 && time(NULL) >= awake_poll_next) {
+		static const char *dumpsys[] = { "/system/bin/dumpsys", "/bin/dumpsys", NULL };
+		char buf[8192];
+		int n = run_capture(dumpsys, "power", NULL, NULL, buf, (int)sizeof(buf));
+		if (n > 0) {
+			awake_probed = 1;
+			awake_cached = !(strstr(buf, "mWakefulness=Asleep") != NULL ||
+				strstr(buf, "mHoldingDisplaySuspendBlocker=false") != NULL);
+		}
+		awake_poll_next = time(NULL) + awake_poll_secs;
+	}
+	if (awake_probed) return awake_cached;
+	{
+		char buf[4096];
+		int n = read_head("/sys/power/wake_lock", buf, (int)sizeof(buf));
+		if (n <= 0) return 1;		/* no signal file: assume awake */
+		return strstr(buf, "PowerManagerService.Display") != NULL;
+	}
 }
 
 static char has_file(const char *p) { return access(p, 0) == 0; }
@@ -806,6 +840,11 @@ static int parse_conf(const char *path)
 			opt_standby_bright = atoi(v);
 			if (opt_standby_bright < 1) opt_standby_bright = 1;
 			if (opt_standby_bright > 7) opt_standby_bright = 7;
+		}
+		else if (!strcmp(k, "awake_poll")) {
+			awake_poll_secs = atoi(v);
+			if (awake_poll_secs < 0) awake_poll_secs = 0;
+			if (awake_poll_secs > 60) awake_poll_secs = 60;
 		}
 		else if (!strcmp(k, "icons")) {
 			icon_en[IL_USB]   = strstr(v, "usb")   ? 1 : 0;

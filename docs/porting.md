@@ -45,6 +45,7 @@ FD650 (I2C) пока не поддерживается вовсе.
 | `vdec_file=/sys/class/vdec/core` | путь к сигнатуре Amlogic-декодера |
 | `brightness` / `standby_brightness` | яркость при работе / яркость приглушённого сна (1..7) |
 | `standby` | поведение при погасшем экране: `dim` (приглушить) / `off` / `keep` |
+| `awake_poll=2` | как решать «экран спит», если wake_lock не снимает `Display`-лок: 1) `/sys/class/graphics/fb0/blank` (1..4 = погас), 2) опрос `dumpsys power` раз в `awake_poll` секунд (mWakefulness=Asleep), 3) wake_lock. `0` = отключить опрос |
 | `tz_offset` / `time_format` | форс часовой пояс и 12/24 (иначе по Android) |
 
 Таблица соответствий «тип дисплея → логическая иконка» по умолчанию
