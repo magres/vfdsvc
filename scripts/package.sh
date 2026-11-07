@@ -10,11 +10,11 @@ rm -rf "$STAGE" && mkdir -p "$STAGE"
 cd "$HERE"
 cp dist/vfdsvc-armv7 dist/vfdsvc-arm64 "$STAGE/"
 cp -r conf scripts tooling "$STAGE/"
-cp README.txt LICENSE "$STAGE/"
+cp README.md LICENSE "$STAGE/"
 
 # adb binaries are optional at packaging time (CI fetches them; local zip
 # without tooling falls back to system adb)
-find "$STAGE/tooling" -type f \( -name 'adb' -o -name 'adb.exe' -o -name '*.dll' \) ! -name 'README.md' | while read -r f; do
+find "$STAGE/tooling" -type f \( -name 'adb' -o -name 'adb.exe' -o -name '*.dll' \) | while read -r f; do
   [ -s "$f" ] || rm -f "$f"
 done
 
