@@ -1,0 +1,60 @@
+name: build
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: cross-build (docker ubuntu:18.04)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build vfdsvc-armv7 (static)
+        run: make armv7
+
+      - name: Build vfdsvc-arm64 (static)
+        run: make arm64
+
+      - name: Smoke
+        run: |
+          file dist/vfdsvc-armv7 dist/vfdsvc-arm64
+          test -x dist/vfdsvc-armv7 && test -x dist/vfdsvc-arm64
+
+      - name: Fetch adb tooling (official platform-tools, not stored in git)
+        run: |
+          mkdir -p tooling/windows tooling/macos tooling/linux
+          curl -fsSL -o pt-w.zip https://dl.google.com/android/repository/platform-tools-latest-windows.zip
+          curl -fsSL -o pt-m.zip https://dl.google.com/android/repository/platform-tools-latest-darwin.zip
+          unzip -o -q pt-w.zip -d ext-w "platform-tools/adb.exe" "platform-tools/AdbWinApi.dll" "platform-tools/AdbWinUsbApi.dll"
+          unzip -o -q pt-m.zip -d ext-m "platform-tools/adb"
+          cp ext-w/platform-tools/adb.exe ext-w/platform-tools/AdbWinApi.dll ext-w/platform-tools/AdbWinUsbApi.dll tooling/windows/
+          cp ext-m/platform-tools/adb tooling/macos/adb
+          cp "$(command -v adb || echo /usr/bin/true)" tooling/linux/adb 2>/dev/null || \
+            curl -fsSL https://dl.google.com/android/repository/platform-tools-latest-linux.zip -o pt-l.zip && \
+            unzip -o -q pt-l.zip -d ext-l "platform-tools/adb" && cp ext-l/platform-tools/adb tooling/linux/adb
+          chmod +x tooling/*/adb tooling/*/adb.exe
+          file tooling/linux/adb tooling/macos/adb || true
+
+      - name: Package release zip
+        run: bash scripts/package.sh
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vfdsvc-zip
+          path: dist/*.zip
+
+      - name: Release (tags v*)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.zip
+          generate_release_notes: true
