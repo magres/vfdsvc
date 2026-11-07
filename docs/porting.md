@@ -1,71 +1,155 @@
-# Porting vfdsvc to other Amlogic boxes
+# Кастомизация vfdsvc под свою приставку
 
-`vfdsvc` is fully driven by a single config file (the same format used by the
-excellent [linux_openvfd `vfd.conf` collection](https://github.com/arthur-liberman/vfd-configurations)).
-To support another box you usually only need a slightly different conf.
+`vfdsvc` — универсальный движок + конфиг: специфика конкретной железки целиком
+задается файлом конфигурации, код пересобирать не нужно. Этот документ
+объясняет, как завести любую Amlogic-приставку со светодиодным дисплеем на
+контроллерах FD628 / FD620 / TM1618 и где проходят границы применимости.
 
-## Quick route
+## Что умеет демон (одним взглядом)
 
-1. Open the upstream repo list and check whether your box already has a
-   `*-vfd.conf` (e.g. `tanix-tx3-mini-vfd.conf`, `x96-max-vfd.conf`, …).
-2. Copy it to `conf/<your-box>-vfd.conf`, then append the vfdsvc extras:
-   ```
-   brightness=7
-   standby=dim
-   icons=usb,eth,wifi,play
-   # optional manual UTC offset; daemon auto-detects otherwise
-   # tz_offset=+0500
-   ```
-3. Run:
-   ```
-   ./scripts/install.sh <box-ip>            # uses conf/tx92-vfd.conf by default
-   ```
-   (installer currently hardcodes `conf/tx92-vfd.conf`; pass your own file by
-   replacing its contents during experiments, or just edit it.)
-4. Verify geometry with the display test:
-   ```
-   ./scripts/install.sh <box-ip> --test 10
-   ```
+- часы `HH:MM` с мигающим двоеточием, авто часовой пояс и 12/24 час
+  (из настроек Android, сверка раз в час);
+- 8 логических иконок, у каждой свой настраиваемый датчик: usb, eth, wifi,
+  play, pause, bt, alarm (плюс двоеточие);
+- яркость 1..7 и отдельная яркость приглушённого сна;
+- стендбай-режимы: `dim` / `off` / `keep`;
+- разовая отвязка «ожившихся» драйверов пинов (на slimBOX — `i2c_b`).
 
-## What each key controls
+## Ключи конфигурации
 
-| Key | Meaning |
+### Аппаратная часть (унаследовано от linux_openvfd)
+
+| ключ | значение |
 | --- | --- |
-| `vfd_gpio_clk/dat/stb` | `bank,pin,res`: bank 0 = main GPIO bank (`periphs-banks`), 1 = AO bank (`aobus-banks`) |
-| `vfd_chars` | digit placement `D,H10,H,M10,M` → grid indexes |
-| `vfd_dot_bits` | logical icon → hardware bit order |
-| `vfd_display_type` | `layout,reserved,flags,controller` — layout picks the glyph tables (1 = T95/TX92-like → `tab1`, 7 = G9SX → `tab3`, 9 = TAP1 → `tab5`, other → `tab2`); controller `0` = FD628, `1` = FD620, `2` = TM1618 (SPI 3-wire). FD650 (I2C) is **not** supported yet |
+| `vfd_gpio_clk/dat/stb` | пины дисплея: `bank,pin,res`. Банк `0` = основной GPIO-банк (periphs-banks), `1` = AO (aobus-banks) |
+| `vfd_chars` | где физически расположены знаки: `D,H10,H,M10,M` (D-карта иконок) |
+| `vfd_dot_bits` | порядок точек-иконок по сетке (0..6) |
+| `vfd_display_type` | `layout,reserved,flags,controller`: layout выбирает таблицу символов; controller `0`=FD628, `1`=FD620, `2`=TM1618 |
 
-## Finding the pins yourself (when a conf doesn't exist for your box)
+Таблицы синтаксиса символов (какие сегменты вы сами увидите после `--test`):
+typical: `1` = T95/TX92-подобные, `7` = G9SX, `9` = TAP1; остальное — дефолт.
+FD650 (I2C) пока не поддерживается вовсе.
 
-On a **stock** firmware that still shows the clock, nothing easier:
+### Иконки и датчики (vfdsvc-расширения формата)
 
+| ключ | значение |
+| --- | --- |
+| `icons=usb,eth,wifi,play,pause,bt,alarm` | какие иконки вешать на панель; уберите лишние |
+| `icon_map=` | ручная привязка «имя=dot 0..6»: `alarm=0,usb=1,play=2,pause=3,colon=4,eth=5,wifi=6,bt=0`; перекрывает таблицы |
+| `play_sources=vdec,pcm,lock` | датчики ▶ (любой из них достаточно): `vdec` — видеодекодер занят (путь tweak: `vdec_file=`), `pcm` — звук обязан бежать (`/proc/asound/*/sub0/status`), `lock` — userspace wake-lock `*Playback*` |
+| `pause_mode=vdec_no_pcm` (или `off`) | ⏸: декодер жив, звука нет — считается «паузой» (у немого видео сработает тоже) |
+| `alarm_method=auto/settings/dumpsys/off` | 🔔 горит при наличии ближайшего будильника; `auto` = settings, затем dumpsys |
+| `alarm_interval=30` | период проверки будильника (сек, 5..3600) |
+| `bt_source=rfkill` (или `off`) | Bluetooth по `/sys/class/rfkill` (`type=bluetooth`, `state=1`); светится только если после `icon_map`/типа панели есть точка BT |
+| `net_fallback=on` | eth0 нет → пробовать eth1; wlan0 нет → wlan1 |
+| `vdec_file=/sys/class/vdec/core` | путь к сигнатуре Amlogic-декодера |
+| `brightness` / `standby_brightness` | яркость при работе / яркость приглушённого сна (1..7) |
+| `standby` | поведение при погасшем экране: `dim` (приглушить) / `off` / `keep` |
+| `tz_offset` / `time_format` | форс часовой пояс и 12/24 (иначе по Android) |
+
+Таблица соответствий «тип дисплея → логическая иконка» по умолчанию
+(заимствует разметку камней upstream):
+
+| dot | type 0/1 (TX92) | type 2 (X92) | type 3 (ABOX) | type 6 (M9 Pro) |
+| --- | --- | --- | --- | --- |
+| 0 | alarm | APPS | — | **bt** |
+| 1 | usb | SETUP | — | eth |
+| 2 | play | usb | — | wifi |
+| 3 | pause | CARD | eth | — |
+| 4 | colon | colon | colon | colon |
+| 5 | eth | HDMI | wifi | — |
+| 6 | wifi | CVBS | — | — |
+
+Иная раскладка панели решается одной строкой `icon_map=`.
+
+## Как завести свой бокс (пошагово)
+
+1. **Найдите готовый конфиг.** База
+   [arthur-liberman/vfd-configurations](https://github.com/arthur-liberman/vfd-configurations)
+   собрала сто файлов для разных моделей — возьмите файл для вашей железки
+   (`<модель>-vfd.conf`) как основу.
+2. **Либо посчитайте пины сами** — на «заводской» прошивке, где дисплей ещё
+   жив:
+   ```sh
+   adb shell
+   su
+   cat /sys/kernel/debug/pinctrl/*/pinmux-pins | grep -v UNCLAIMED
+   ```
+   ищите строки, где в описании владельца упоминается дисплей (часто это
+   контроллер на 3 пинах этого банка). Разобрать, какой из них CLK, а какой
+   DAT/STB, проще всего пробным подключением и `--test`; три числа идут в
+   `vfd_gpio_*`.
+3. **Добавьте блок vfdsvc-опций** и включите те иконки, точки под которые
+   физически есть на вашей панели. Точка, которой не существует (например BT
+   у TX92), останется несветящейся — «по умолчанию» она не сопоставлена.
+4. **Соберите под тест:** `./scripts/install.sh <ip> --test 10` проверит все
+   сегменты и все точки; время будет инсталировано из вашего конфига в
+   `/system/etc/vfdsvc.conf`.
+5. **Подбор раскладки (мусор или неверные цифры на дисплее):** `--demo 12:34 5` покажет готовый кадр
+   вместо часов; правки `vfd_chars` / `icon_map` повторяйте, пока картинка
+   не станет правильной.
+6. **Отправьте результат** пул-реквестом (`conf/<модель>-vfd.conf`) — ваш
+   конфиг станет готовым пресетом для всех.
+
+## Границы применимости (честное описание)
+
+1. **Транспорт.** Поддержаны только 3-проводные контроллеры: FD628/FD620/
+   TM1618. **FD650 (I2C) не поддерживается** — другой транспорт; OLED/LCD
+   (SSD1306, HD44780, SH1106) — тоже нет (они в ядерном linux_openvfd).
+2. **Root.** Демон требует root (adb root или su) и возможность записать
+   `/system/bin`, `/system/etc`. На стоках root обычно пришел; на
+   SELinux-enforcing и «кастомных» сборках с жёсткими правилами возможы
+   отказы.
+3. **Датчик медиа.** `vdec` — сигнатура Amlogic (S805…S922X); на Rockchip
+   остаётся только `pcm` (звук) и `lock` (если прошивка пишет): на видео без
+   звука ▶ там не загорится, а «пауза» не определяется. Внешних зависимостей
+   в бинарниках нет: они статические.
+4. **Будильник** — опрос Android-утилитами (`settings`, `dumpsys`); на
+   не-Android сборках (Armbian и проч.) включает форс: `tz_offset`,
+   `time_format` в конфиге.
+5. **Пины.** Занятые драйверы отцепляются через runtime unbind (проверено на
+   slimBOX); «незримый» владелец, не отображённый в
+   `/sys/kernel/debug/pinctrl`, не отцепится — дисплей на таких боксов
+   молчит.
+6. **Сон.** Дисплей обновляется, пока приставка не ушла в глубокий сон
+   (полный suspend); после этого яркость и кадр остаются «замороженными» —
+   контроллер FD628 держит последние посланные данные. Также работает
+   засыпание с приглушением (`standby_brightness`), если прошивка только
+   гасит экран. При выключении дисплей гаснет.
+7. **Один дисплей на бокс**; двух не предусмотрено.
+
+## Быстрая шпаргалка конфигов
+
+```conf
+# Минимум для TX92 (уже в conf/tx92-vfd.conf поставки)
+vfd_gpio_clk='0,76,0'
+vfd_gpio_dat='0,75,0'
+vfd_gpio_stb='0,53,0'
+vfd_chars='4,3,2,1,0'
+vfd_dot_bits='0,1,2,3,4,5,6'
+vfd_display_type='0x01,0x00,0x00,0x00'
+brightness=7
+standby=dim
+standby_brightness=3
+time_format=auto
+icons=usb,eth,wifi,play,pause,bt,alarm
+play_sources=vdec,pcm,lock
+pause_mode=vdec_no_pcm
+alarm_method=auto
+alarm_interval=30
+bt_source=rfkill
+net_fallback=on
+#icon_map=alarm=0,usb=1,play=2,pause=3,colon=4,eth=5,wifi=6,bt=0
 ```
-adb shell
-su
-cat /sys/kernel/debug/pinctrl/*/pinmux-pins | grep -v UNCLAIMED
-```
-look for lines whose "store" column shows some LE display-related consumer
-specific for your box, e.g. "periphs-banks:477". The pin in () is the bank number…
-Actually the mapping is per-bank: `/sys/class/gpio/gpiochip*/label` gives
-`periphs-banks`/`aobus-banks`; the conf pin index equals the debugfs `pin N`.
 
-If you need to "discover" the pins of the display, the earlier linux_openvfd
-effort has debug instructions: run the box's stock driver with verbose logging
-and watch `dmesg`, or try the controller chips by trial with `--test`.
+## Что ещё стоит знать
 
-## If pins are held by a built-in driver
-
-The shipped bootstrap (`scripts/sys_leds`) automatically unbinds whatever
-driver claims the display pins (reads it from
-`/sys/kernel/debug/pinctrl/*/pinmux-pins`), so conflicts like TX92's
-`c11087c0.i2c` get resolved at every boot without manual work.
-
-## Known limitations
-
-- Only SPI-3-wire family controllers (FD628/FD620/TM1618). FD650-family
-  (2-wire, I2C-like) is not implemented yet — patches welcome.
-- Icon semantics depend on the layout group; groups are mapped in
-  `src/vfdsvc.c` (`grp_icons`), tweak as needed.
-- Timezone is auto-detected every hour via the box's own `date +%z`; set
-  `tz_offset=+HHMM` in the conf to pin it manually.
+- Тестовый режим `--test 10` зажигает **все** сегменты и **все** точки —
+  очень удобно сверять раскладку.
+- `--demo HH:MM [sec]` — показать конкретное время вне графика демона.
+- Комплект adb (Windows/Linux/macOS) лежит в `tooling/` архива и не хранится
+  в git; сборка демона — только из исходников (`make armv7 arm64`) и порогово
+  не требует большого числа зависимостей.
+- Протокол и таблицы символов происходя от
+  [linux_openvfd](https://github.com/arthur-liberman/linux_openvfd)
+  (GPL-3.0), спасибо авторам.

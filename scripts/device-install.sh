@@ -32,6 +32,11 @@ mount -o remount,rw /system 2>/dev/null || true
 [ -f "$SRC/vfdsvc.conf" ] || { echo "ERROR: payload missing (conf)";      exit 1; }
 [ -f "$SRC/sys_leds" ]    || { echo "ERROR: payload missing (bootstrap)"; exit 1; }
 
+# 0) stop the running daemon and its supervisor BEFORE replacing any file
+#    (otherwise 'cp vfdsvc' fails with 'Text file busy')
+stop sys_leds 2>/dev/null || true
+killall vfdsvc 2>/dev/null || true
+
 # 1) daemon binary
 cp "$SRC/vfdsvc" "$DAEMON"
 chmod 755 "$DAEMON"
@@ -43,10 +48,7 @@ cp "$SRC/vfdsvc.conf" "$CONF"
 chmod 644 "$CONF"
 chown root:root "$CONF" 2>/dev/null || true
 
-# 3) bootstrap script + backup of the original; also stop the old service
-#    and any daemon that might fight over the display pins
-stop sys_leds 2>/dev/null || true
-killall vfdsvc 2>/dev/null || true
+# 3) bootstrap script + backup of the original
 if [ -f "$BOOT" ] && ! grep -qs "vfdsvc-bootstrap" "$BOOT"; then
 	[ -f "$BOOT.orig" ] || cp "$BOOT" "$BOOT.orig"
 fi

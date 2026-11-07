@@ -55,12 +55,36 @@ static int conf_ctrl  = 0;		/* 0=FD628 1=FD620 2=TM1618 */
 
 static int opt_brightness = 7;		/* 1..7, override from -b */
 static int opt_standby = 1;		/* 0=keep 1=dim 2=off */
+static int opt_standby_bright = 1;	/* 1..7: brightness level for standby=dim */
 static int opt_tz_offset_sec = INT_MIN;	/* manual conf override; INT_MIN => auto */
 static int tz_auto = 1;			/* auto-detect via bionic `date +%z` */
 static time_t tz_next_check = 0;
 static int opt_time_format = 0;		/* 0=auto, 12 or 24 forced */
 static int hour12 = 0;			/* detected/effective 12h flag */
-static int icon_en_usb = 1, icon_en_eth = 1, icon_en_wifi = 1, icon_en_play = 1;
+
+/* logical icons: 0 usb, 1 play, 2 colon, 3 eth, 4 wifi, 5 pause, 6 bt, 7 alarm */
+static int icon_en[8] = { 1, 1, 1, 1, 1, 0, 0, 0 };
+#define IL_USB 0
+#define IL_PLAY 1
+#define IL_COLON 2
+#define IL_ETH 3
+#define IL_WIFI 4
+#define IL_PAUSE 5
+#define IL_BT 6
+#define IL_ALARM 7
+
+/* media/alarm state sensors (configurable) */
+static int play_src_vdec = 1, play_src_pcm = 1, play_src_wakelock = 1;
+static int pause_mode_on = 1;		/* vdec alive & audio silent => paused */
+static int alarm_method = 1;		/* 0 off, 1 auto(settings->dumpsys), 2 settings, 3 dumpsys */
+static int alarm_interval = 30;
+static int bt_src_rfkill = 1;
+static int net_fallback_on = 1;		/* try eth1/wlan1 when eth0/wlan0 absent */
+static char vdec_path[160] = "/sys/class/vdec/core";
+static int icon_map[8] = { -1, -1, -1, -1, -1, -1, -1, -1 };	/* logical icon -> dot 0..6 */
+static time_t alarm_next_check = 0;
+static int alarm_on = 0;
+
 static int g_demo_h = 0, g_demo_m = 0;
 static const char *conf_path = DEFAULT_CONF;
 
@@ -176,14 +200,72 @@ static void refresh_format(void)
 	}
 }
 
-/* Icon bit-index per display-type group (openvfd LED_DOT1..5 enums):
- * columns: USB, PLAY, COLON, ETH, WIFI */
-static const int grp_icons[5][5] = {
-	{ 1, 2, 4, 5, 6 },	/* types 0,1: ALARM,USB,PLAY,PAUSE,SEC,ETH,WIFI */
-	{ 2,-1, 4,-1,-1 },	/* type 2 (X92): APPS,SETUP,USB,CARD,SEC,HDMI,CVBS */
-	{ -1,-1, 4, 3, 5 },	/* type 3 (ABOX): POWER,LAN,SEC,WIFI */
-	{ -1,-1, 4, 1, 2 },	/* type 6 (M9_PRO): BT,ETH,WIFI,SPDIF,SEC,HDMI,AV */
-	{ 1, 2, 4, 5, 6 },	/* other/unknown -> group0 layout */
+/* ---------------- small file & exec helpers ----------------------------- */
+
+static int read_head(const char *path, char *buf, int cap)
+{
+	int f, r = -1;
+	if (cap < 1) return -1;
+	f = open(path, O_RDONLY);
+	if (f < 0) return -1;
+	r = (int)read(f, buf, (size_t)cap - 1);
+	close(f);
+	buf[r > 0 ? r : 0] = 0;
+	return r;
+}
+
+/* fork/exec a small helper binary and capture stdout (used by alarm probes).
+ * Returns number of bytes read (>=0), or -1 when nothing ran. */
+static int run_capture(const char *const *progs, const char *a1, const char *a2,
+	                   const char *a3, char *buf, int cap)
+{
+	char prog[256], *argv[8];
+	int i, argc = 0, got = -1;
+
+	argv[argc++] = (char *)progs[0]; argv[argc++] = (char *)a1; argv[argc++] = (char *)a2;
+	if (a3) argv[argc++] = (char *)a3;
+	argv[argc] = NULL;
+	for (i = 0; progs[i] != NULL; i++) {
+		int pfd[2], pid, status, ntot = 0;
+
+		snprintf(prog, sizeof(prog), "%s", progs[i]);
+		if (pipe(pfd) != 0) return -1;
+		pid = fork();
+		if (pid == 0) {
+			int d = open("/dev/null", O_WRONLY);
+			if (d >= 0) { dup2(d, STDERR_FILENO); close(d); }
+			close(pfd[0]);
+			dup2(pfd[1], STDOUT_FILENO);
+			close(pfd[1]);
+			argv[0] = (char *)progs[i];
+			execv(prog, argv);
+			_exit(127);
+		}
+		if (pid < 0) { close(pfd[0]); close(pfd[1]); continue; }
+		close(pfd[1]);
+		for (;;) {
+			ssize_t r = read(pfd[0], buf + ntot, cap - 1 - ntot);
+			if (r <= 0) break;
+			ntot += (int)r;
+			if (ntot >= cap - 1) break;
+		}
+		close(pfd[0]);
+		waitpid(pid, &status, 0);
+		if (ntot > 0) { buf[ntot] = 0; got = ntot; break; }
+	}
+	return got;
+}
+
+/* ---------------- icon bit mapping -------------------------------------- */
+
+/* Icon dot-index per display-type group (openvfd LED_DOT enums):
+ * columns: USB, PLAY, COLON, ETH, WIFI, PAUSE, BT, ALARM */
+static const int grp_icons[5][8] = {
+	{ 1, 2, 4, 5, 6, 3, -1, 0 },	/* types 0,1 (TX92): ALARM,USB,PLAY,PAUSE,SEC,ETH,WIFI */
+	{ 2,-1, 4,-1,-1,-1,-1,-1 },	/* type 2 (X92): APPS,SETUP,USB,CARD,SEC,HDMI,CVBS */
+	{-1,-1, 4, 3, 5,-1,-1,-1 },	/* type 3 (ABOX): POWER,LAN,SEC,WIFI */
+	{-1,-1, 4, 1, 2,-1, 0,-1 },	/* type 6 (M9_PRO): BT,ETH,WIFI,SPDIF,SEC,HDMI,AV */
+	{ 1, 2, 4, 5, 6, 3,-1, 0 },	/* other/unknown -> group0 layout */
 };
 
 static int icon_group(void)
@@ -197,12 +279,20 @@ static int icon_group(void)
 	}
 }
 
-static int icon_bit(int which)	/* 0 usb, 1 play, 2 colon, 3 eth, 4 wifi */
+static int icon_bit(int which)	/* 0..7 logical icons, see defines above */
 {
-	int g = icon_group();
-	int i = grp_icons[g][which];
-	if (i < 0 || i > 6) return -1;
-	return 1 << conf_dots[i];
+	if (which < 0 || which > 7) return -1;
+	if (icon_map[which] >= 0) {
+		int d = icon_map[which];
+		if (d < 0 || d > 6) return -1;
+		return 1 << conf_dots[d];
+	}
+	{
+		int g = icon_group();
+		int i = grp_icons[g][which];
+		if (i < 0 || i > 6) return -1;
+		return 1 << conf_dots[i];
+	}
 }
 
 /* ---------------- glyph tables (from linux_openvfd glyphs.h) ------------ */
@@ -475,31 +565,133 @@ static int screen_awake(void)
 
 static char has_file(const char *p) { return access(p, 0) == 0; }
 
+/* ------ media state sensors (all cheap reads, evaluated ~1/s) ---------- */
+
+static int media_pcm_running(void)
+{
+	static const char *devs[] = { "card0/pcm0p", "card0/pcm1p", "card0/pcm2p", NULL };
+	char path[96], buf[48];
+	int i, on = 0, n;
+	for (i = 0; devs[i] != NULL; i++) {
+		snprintf(path, sizeof(path), "/proc/asound/%s/sub0/status", devs[i]);
+		n = read_head(path, buf, (int)sizeof(buf));
+		if (n > 0 && strstr(buf, "state: RUNNING")) { on = 1; break; }
+	}
+	return on;
+}
+
+static int media_vdec_busy(void)
+{
+	char buf[256];
+	int n = read_head(vdec_path, buf, (int)sizeof(buf));
+	return (n > 0 && strstr(buf, "VDEC_STATUS_CONNECTED")) ? 1 : 0;
+}
+
+static int wakelock_playback(void)
+{
+	char buf[4096];
+	int n = read_head("/sys/power/wake_lock", buf, (int)sizeof(buf));
+	if (n <= 0) return 0;
+	return (strstr(buf, "Playback") || strstr(buf, "playback")) ? 1 : 0;
+}
+
+static int sensor_play(void)
+{
+	if (!icon_en[IL_PLAY]) return 0;
+	if (play_src_vdec && media_vdec_busy()) return 1;
+	if (play_src_pcm && media_pcm_running()) return 1;
+	if (play_src_wakelock && wakelock_playback()) return 1;
+	return 0;
+}
+
+static int sensor_pause(void)
+{
+	if (!icon_en[IL_PAUSE] || !pause_mode_on) return 0;
+	/* video decoder alive while audio is not flowing => paused (or muted) */
+	return (media_vdec_busy() && !media_pcm_running()) ? 1 : 0;
+}
+
+static int sensor_bt(void)
+{
+	DIR *d;
+	struct dirent *de;
+	int on = 0;
+
+	if (!icon_en[IL_BT] || !bt_src_rfkill) return 0;
+	d = opendir("/sys/class/rfkill");
+	if (!d) return 0;
+	while ((de = readdir(d)) && !on) {
+		char p[96], b[32];
+		if (strncmp(de->d_name, "rfkill", 6)) continue;
+		snprintf(p, sizeof(p), "/sys/class/rfkill/%s/type", de->d_name);
+		if (read_head(p, b, (int)sizeof(b)) <= 0 || strncmp(b, "bluetooth", 9)) continue;
+		snprintf(p, sizeof(p), "/sys/class/rfkill/%s/state", de->d_name);
+		if (read_head(p, b, (int)sizeof(b)) > 0 && (atoi(b) & 1)) on = 1;
+	}
+	closedir(d);
+	return on;
+}
+
+static void alarm_check(void)
+{
+	char buf[16384];
+	int n;
+
+	if (alarm_method == 0) { alarm_on = 0; return; }
+	if (alarm_method == 1 || alarm_method == 2) {
+		static const char *settings[] = { "/system/bin/settings", "/bin/settings", NULL };
+		n = run_capture(settings, "get", "global", "next_alarm_formatted", buf, 128);
+		if (n > 0 && buf[0] && strncmp(buf, "null", 4) != 0) {
+			alarm_on = 1;
+			alarm_next_check = time(NULL) + alarm_interval;
+			return;
+		}
+		if (alarm_method == 2) { alarm_on = 0; alarm_next_check = time(NULL) + alarm_interval; return; }
+	}
+	{
+		static const char *dumpsys[] = { "/system/bin/dumpsys", "/bin/dumpsys", NULL };
+		n = run_capture(dumpsys, "alarm", NULL, NULL, buf, (int)sizeof(buf));
+		alarm_on = (n > 0 && strstr(buf, "mNextAlarmClock=AlarmClock")) ? 1 : 0;
+	}
+	alarm_next_check = time(NULL) + alarm_interval;
+}
+
+static int sensor_alarm(void)
+{
+	if (!icon_en[IL_ALARM] || alarm_method == 0) return 0;
+	return alarm_on;
+}
+
+static int if_operstate_up(const char *ifc)
+{
+	char path[64], buf[16];
+	int n = 0;
+
+	snprintf(path, sizeof(path), "/sys/class/net/%s/operstate", ifc);
+	if (access(path, 0) != 0) return -1;		/* interface absent */
+	n = read_head(path, buf, (int)sizeof(buf));
+	return (n > 0 && strncmp(buf, "up", 2) == 0) ? 1 : 0;
+}
+
 static int icon_is_on(int which)
 {
 	switch (which) {
-	case 0:	return icon_en_usb &&
-		(has_file("/storage/usb_storage") || has_file("/dev/block/sda"));
-	case 1: {	/* play: media playback wake locks */
-		char buf[4096]; int f, r = 0, on = 0;
-		f = open("/sys/power/wake_lock", O_RDONLY);
-		if (f < 0) return 0;
-		r = (int)read(f, buf, sizeof(buf) - 1);
-		close(f); buf[r > 0 ? r : 0] = 0;
-		if (strstr(buf, "Playback") || strstr(buf, "playback")) on = 1;
-		return icon_en_play && on;
+	case IL_USB:
+		return icon_en[IL_USB] &&
+			(has_file("/storage/usb_storage") || has_file("/dev/block/sda"));
+	case IL_PLAY:	return sensor_play();
+	case IL_PAUSE:	return sensor_pause();
+	case IL_BT:	return sensor_bt();
+	case IL_ALARM:	return sensor_alarm();
+	case IL_ETH: {
+		int up = if_operstate_up("eth0");
+		if (up < 0 && net_fallback_on) up = if_operstate_up("eth1");
+		return icon_en[IL_ETH] && up == 1;
 	}
-	case 3: case 4: {	/* eth/wifi: interface operstate */
-		char path[64], buf[16];
-		const char *ifc = (which == 3) ? "eth0" : "wlan0";
-		int f, r = 0, up = 0, en = (which == 3) ? icon_en_eth : icon_en_wifi;
-		snprintf(path, sizeof(path), "/sys/class/net/%s/operstate", ifc);
-		f = open(path, O_RDONLY);
-		if (f < 0) return 0;
-		r = (int)read(f, buf, sizeof(buf) - 1);
-		close(f); buf[r > 0 ? r : 0] = 0;
-		if (!strncmp(buf, "up", 2)) up = 1;
-		return en && up;
+	case IL_WIFI: {
+		int up = if_operstate_up("wlan0");
+		if (up < 0 && net_fallback_on) up = if_operstate_up("wlan1");
+		return icon_en[IL_WIFI] && up == 1;
 	}
 	default: return 0;
 	}
@@ -508,14 +700,13 @@ static int icon_is_on(int which)
 static int icons_mask(void)
 {
 	int m = 0, i;
-	for (i = 0; i < 5; i++) {
-		if (i == 2) continue;		/* colon handled separately */
+	for (i = 0; i < 8; i++) {
+		if (i == IL_COLON) continue;		/* colon handled separately */
 		if (icon_is_on(i)) {
 			int b = icon_bit(i);
 			if (b > 0) m |= b;
 		}
 	}
-	/* play icon on TX92: wake_lock names differ across builds; match too */
 	return m;
 }
 
@@ -547,6 +738,27 @@ static void dequote(char *v)
 	if (l >= 2 && ((v[0] == '\'' && v[l - 1] == '\'') || (v[0] == '"' && v[l - 1] == '"'))) {
 		v[l - 1] = 0;
 		memmove(v, v + 1, l - 1);
+	}
+}
+
+static const struct { const char *name; int idx; } icon_names[8] = {
+	{ "usb", 0 }, { "play", 1 }, { "colon", 2 }, { "eth", 3 },
+	{ "wifi", 4 }, { "pause", 5 }, { "bt", 6 }, { "alarm", 7 }
+};
+
+static void parse_icon_map(char *v)
+{
+	char *tok = strtok(v, ", ");
+	while (tok) {
+		char *eq = strchr(tok, '=');
+		int i;
+		if (eq) {
+			int d = (int)strtol(eq + 1, NULL, 0);
+			*eq = 0;
+			for (i = 0; i < 8; i++)
+				if (!strcmp(tok, icon_names[i].name)) { icon_map[i] = d; break; }
+		}
+		tok = strtok(NULL, ", ");
 	}
 }
 
@@ -590,12 +802,41 @@ static int parse_conf(const char *path)
 			else if (!strncmp(v, "keep", 4)) opt_standby = 0;
 			else opt_standby = 1;
 		}
-		else if (!strcmp(k, "icons")) {
-			icon_en_usb = strstr(v, "usb") ? 1 : 0;
-			icon_en_eth = strstr(v, "eth") ? 1 : 0;
-			icon_en_wifi = strstr(v, "wifi") ? 1 : 0;
-			icon_en_play = strstr(v, "play") ? 1 : 0;
+		else if (!strcmp(k, "standby_brightness")) {
+			opt_standby_bright = atoi(v);
+			if (opt_standby_bright < 1) opt_standby_bright = 1;
+			if (opt_standby_bright > 7) opt_standby_bright = 7;
 		}
+		else if (!strcmp(k, "icons")) {
+			icon_en[IL_USB]   = strstr(v, "usb")   ? 1 : 0;
+			icon_en[IL_PLAY]  = strstr(v, "play")  ? 1 : 0;
+			icon_en[IL_PAUSE] = strstr(v, "pause") ? 1 : 0;
+			icon_en[IL_BT]    = strstr(v, "bt")    ? 1 : 0;
+			icon_en[IL_ALARM] = strstr(v, "alarm") ? 1 : 0;
+			icon_en[IL_ETH]   = strstr(v, "eth")   ? 1 : 0;
+			icon_en[IL_WIFI]  = strstr(v, "wifi")  ? 1 : 0;
+		}
+		else if (!strcmp(k, "play_sources")) {
+			play_src_vdec     = strstr(v, "vdec")  ? 1 : 0;
+			play_src_pcm      = strstr(v, "pcm")   ? 1 : 0;
+			play_src_wakelock = strstr(v, "lock")  ? 1 : 0;
+		}
+		else if (!strcmp(k, "pause_mode"))	pause_mode_on = strncmp(v, "off", 3) != 0;
+		else if (!strcmp(k, "alarm_method")) {
+			if (!strncmp(v, "off", 3)) alarm_method = 0;
+			else if (!strncmp(v, "settings", 8)) alarm_method = 2;
+			else if (!strncmp(v, "dumpsys", 7)) alarm_method = 3;
+			else alarm_method = 1;
+		}
+		else if (!strcmp(k, "alarm_interval")) {
+			alarm_interval = atoi(v);
+			if (alarm_interval < 5) alarm_interval = 5;
+			if (alarm_interval > 3600) alarm_interval = 3600;
+		}
+		else if (!strcmp(k, "bt_source"))	bt_src_rfkill = strncmp(v, "off", 3) != 0;
+		else if (!strcmp(k, "net_fallback"))	net_fallback_on = strncmp(v, "off", 3) != 0;
+		else if (!strcmp(k, "vdec_file"))	snprintf(vdec_path, sizeof(vdec_path), "%s", v);
+		else if (!strcmp(k, "icon_map"))	parse_icon_map(v);
 	}
 	fclose(f);
 	return have ? 0 : -2;
@@ -710,7 +951,7 @@ int main(int argc, char **argv)
 		if (awake == 0) {
 			if (last_state != 3) {
 				if (opt_standby == 2) send_brightness((unsigned char)opt_brightness, 1);
-				else if (opt_standby == 1) send_brightness(1, 0);
+				else if (opt_standby == 1) send_brightness((unsigned char)opt_standby_bright, 0);
 				last_state = 3;
 			}
 			for (i = 0; i < 12 && g_running; i++) usleep(250 * 1000);
@@ -718,6 +959,8 @@ int main(int argc, char **argv)
 		}
 		if (last_state == 3) { send_brightness((unsigned char)opt_brightness, 0); }
 		last_state = awake;
+		if (time(NULL) >= alarm_next_check)
+			alarm_check();
 		if (time(NULL) >= tz_next_check) {
 			if (tz_auto) {
 				int off = detect_tz_offset();

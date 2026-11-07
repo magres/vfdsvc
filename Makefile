@@ -1,5 +1,5 @@
 # vfdsvc Makefile — cross-builds static binaries in docker (reproducible).
-VERSION := 0.1.1
+VERSION := 0.1.2
 IMG     := ubuntu:18.04
 PKGS    := gcc libc6-dev build-essential make file \
            gcc-arm-linux-gnueabihf libc6-dev-armhf-cross gcc-aarch64-linux-gnu libc6-dev-arm64-cross
