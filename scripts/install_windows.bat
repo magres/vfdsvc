@@ -2,15 +2,10 @@
 chcp 65001 >nul
 setlocal EnableDelayedExpansion
 title vfdsvc installer for Android TV boxes
+rem Work from the folder this .bat lives in; if it was started from a
+rem subfolder (e.g. scripts\), step back until the archive root is found.
 cd /d "%~dp0"
-
-set ADB=tooling\windows\adb.exe
-if not exist "%ADB%" set ADB=adb
-if not exist "%ADB%" (
-  echo [ERROR] adb.exe not found in tooling\windows and not in PATH.
-  pause
-  exit /b 1
-)
+if not exist "tooling\windows\adb.exe" if exist "..\tooling\windows\adb.exe" cd /d "%~dp0.."
 
 echo =====================================================================
 echo   vfdsvc - driver for the front LED "clock" display of Android TV box
@@ -29,9 +24,20 @@ set ACT=install
 goto ip
 
 :ip
-if "%1"=="" ( set /p IP=Box IP entered (example: 192.168.1.100): ) else ( set "IP=%1" )
-if "%IP%"=="" ( echo IP is not set. & pause & goto end )
-if not "%IP::=%"=="%IP%" ( set CONNECT=%IP% ) else ( set CONNECT=%IP%:5555 )
+set IP=
+if not "%~1"=="" set "IP=%~1"
+if not defined IP set /p "IP=Box IP, for example 192.168.1.100: "
+if not defined IP ( echo No IP entered. & pause & goto end )
+if "%IP::=%"=="%IP%" ( set CONNECT=%IP%:5555 ) else ( set CONNECT=%IP% )
+
+echo == Locating adb ...
+set ADB=tooling\windows\adb.exe
+if not exist "%ADB%" set ADB=adb
+if not exist "%ADB%" (
+  echo [ERROR] adb.exe not found in tooling\windows and not in PATH.
+  pause
+  exit /b 1
+)
 
 echo.
 echo == Connecting to %CONNECT% ...
@@ -41,7 +47,6 @@ echo == Connecting to %CONNECT% ...
 
 echo == Checking root access ...
 "%ADB%" root >nul 2>&1
-echo %errorlevel%
 "%ADB%" shell id -u 2>nul | findstr "=0" >nul
 if errorlevel 1 (
   "%ADB%" shell "su -c 'id -u'" 2>nul | findstr "=0" >nul
@@ -64,9 +69,10 @@ echo    using %BIN%
 
 if "%ACT%"=="test" (
   echo == Display test: all segments and icons light up for 10 seconds ...
-  %ADB% shell "killall vfdsvc" >nul 2>&1
-  %ADB% shell "/data/local/tmp/vfdsvc-installer/vfdsvc -c /system/etc/vfdsvc.conf --test 10"
-  %ADB% shell "/data/local/tmp/vfdsvc-installer/vfdsvc -c /system/etc/vfdsvc.conf &"
+  "%ADB%" shell "stop sys_leds" >nul 2>&1
+  "%ADB%" shell "killall vfdsvc" >nul 2>&1
+  "%ADB%" shell "/data/local/tmp/vfdsvc-installer/vfdsvc -c /system/etc/vfdsvc.conf --test 10"
+  "%ADB%" shell "start sys_leds" >nul 2>&1
   pause
   goto end
 )
@@ -105,8 +111,8 @@ if "%ACT%"=="uninstall" (
 )
 
 echo.
-echo ~ Done! Done. Close the window.
-(timeout /t 6 >nul)
+echo ~ Done! Close the window.
+timeout /t 6 /nobreak >nul 2>nul
 goto end
 
 :end

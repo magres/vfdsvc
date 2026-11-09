@@ -9,7 +9,10 @@ STAGE="$HERE/dist/pack"
 rm -rf "$STAGE" && mkdir -p "$STAGE"
 cd "$HERE"
 cp dist/vfdsvc-armv7 dist/vfdsvc-arm64 "$STAGE/"
-cp -r conf scripts tooling "$STAGE/"
+mkdir -p "$STAGE/scripts"
+cp scripts/sys_leds scripts/device-install.sh scripts/device-uninstall.sh scripts/install.sh "$STAGE/scripts/"
+cp scripts/install_windows.bat "$STAGE/"
+cp -r conf tooling "$STAGE/"
 cp README.md LICENSE "$STAGE/"
 
 # adb binaries are optional at packaging time (CI fetches them; local zip

@@ -56,6 +56,7 @@ static int conf_ctrl  = 0;		/* 0=FD628 1=FD620 2=TM1618 */
 static int opt_brightness = 7;		/* 1..7, override from -b */
 static int opt_standby = 1;		/* 0=keep 1=dim 2=off */
 static int opt_standby_bright = 1;	/* 1..7: brightness level for standby=dim */
+static int sleep_display = 0;		/* 0=keep frozen time, 1=--:-- dashes, 2=blank */
 static int opt_tz_offset_sec = INT_MIN;	/* manual conf override; INT_MIN => auto */
 static int tz_auto = 1;			/* auto-detect via bionic `date +%z` */
 static time_t tz_next_check = 0;
@@ -77,13 +78,13 @@ static int icon_en[8] = { 1, 1, 1, 1, 1, 0, 0, 0 };
 static int play_src_vdec = 1, play_src_pcm = 1, play_src_wakelock = 1;
 static int pause_mode_on = 1;		/* vdec alive & audio silent => paused */
 static int alarm_method = 1;		/* 0 off, 1 auto(settings->dumpsys), 2 settings, 3 dumpsys */
-static int alarm_interval = 30;
-static int bt_src_rfkill = 1;
+static int alarm_interval = 30;static int bt_src_rfkill = 1;
 static int net_fallback_on = 1;		/* try eth1/wlan1 when eth0/wlan0 absent */
 static char vdec_path[160] = "/sys/class/vdec/core";
 static int icon_map[8] = { -1, -1, -1, -1, -1, -1, -1, -1 };	/* logical icon -> dot 0..6 */
 static time_t alarm_next_check = 0;
 static int alarm_on = 0;
+static int awake_cached = 1;		/* sleep-detector cache (poll probe) */
 
 static int g_demo_h = 0, g_demo_m = 0;
 static const char *conf_path = DEFAULT_CONF;
@@ -214,22 +215,23 @@ static int read_head(const char *path, char *buf, int cap)
 	return r;
 }
 
-/* fork/exec a small helper binary and capture stdout (used by alarm probes).
- * Returns number of bytes read (>=0), or -1 when nothing ran. */
-static int run_capture(const char *const *progs, const char *a1, const char *a2,
-	                   const char *a3, char *buf, int cap)
+/* prog list + up to 3 args, capture stdout into buf (cap bytes).
+ * Called sparingly (alarm probe every alarm_interval s, optional sleep
+ * poll probe); a short blocking exec per call is acceptable. */
+static int run_exec(const char *const *progs, const char *a1, const char *a2,
+	                const char *a3, char *buf, int cap)
 {
+	int pfd[2], pid, status, i, argc = 0, ntot = 0;
 	char prog[256], *argv[8];
-	int i, argc = 0, got = -1;
 
-	argv[argc++] = (char *)progs[0]; argv[argc++] = (char *)a1; argv[argc++] = (char *)a2;
+	argv[argc++] = (char *)progs[0];
+	argv[argc++] = (char *)a1;
+	if (a2) argv[argc++] = (char *)a2;
 	if (a3) argv[argc++] = (char *)a3;
 	argv[argc] = NULL;
+	if (pipe(pfd) != 0) return -1;
 	for (i = 0; progs[i] != NULL; i++) {
-		int pfd[2], pid, status, ntot = 0;
-
 		snprintf(prog, sizeof(prog), "%s", progs[i]);
-		if (pipe(pfd) != 0) return -1;
 		pid = fork();
 		if (pid == 0) {
 			int d = open("/dev/null", O_WRONLY);
@@ -237,24 +239,28 @@ static int run_capture(const char *const *progs, const char *a1, const char *a2,
 			close(pfd[0]);
 			dup2(pfd[1], STDOUT_FILENO);
 			close(pfd[1]);
-			argv[0] = (char *)progs[i];
+			argv[0] = prog;
 			execv(prog, argv);
 			_exit(127);
 		}
-		if (pid < 0) { close(pfd[0]); close(pfd[1]); continue; }
-		close(pfd[1]);
-		for (;;) {
-			ssize_t r = read(pfd[0], buf + ntot, cap - 1 - ntot);
-			if (r <= 0) break;
-			ntot += (int)r;
-			if (ntot >= cap - 1) break;
+		if (pid > 0) {
+			close(pfd[1]);
+			while (ntot < cap - 1) {
+				ssize_t r = read(pfd[0], buf + ntot, (size_t)(cap - 1 - ntot));
+				if (r <= 0) break;
+				ntot += (int)r;
+			}
+			close(pfd[0]);
+			waitpid(pid, &status, 0);
+			if (ntot > 0) break;
 		}
-		close(pfd[0]);
-		waitpid(pid, &status, 0);
-		if (ntot > 0) { buf[ntot] = 0; got = ntot; break; }
 	}
-	return got;
+	buf[ntot > 0 ? ntot : 0] = 0;
+	return ntot > 0 ? ntot : -1;
 }
+
+static const char *settings_progs[] = { "/system/bin/settings", "/bin/settings", NULL };
+static const char *dumpsys_progs[] = { "/system/bin/dumpsys", "/bin/dumpsys", NULL };
 
 /* ---------------- icon bit mapping -------------------------------------- */
 
@@ -318,6 +324,14 @@ static const unsigned char *active_tab(void)
 	case 9: return seg_tabs[3];	/* TAP1-like */
 	default: return seg_tabs[1];	/* default tab2 */
 	}
+}
+
+/* glyph for a digit position: 0..9 = digit, -1 = blank, -2 = dash */
+static unsigned char glyph_for(int d)
+{
+	if (d == -2) return seg_dash;
+	if (d < 0 || d > 9) return seg_blank;
+	return active_tab()[d];
 }
 
 /* ---------------- sysfs GPIO ------------------------------------------- */
@@ -466,7 +480,6 @@ static void compose_send(int colon_on, int h10, int h1, int m10, int m1, int ico
 	unsigned short wdata[5], wbuf[8];
 	unsigned char seq[16];
 	int i, grids, len;
-	const unsigned char *tab = active_tab();
 
 	switch (conf_ctrl) {
 	case 1: grids = 5; break;
@@ -475,10 +488,10 @@ static void compose_send(int colon_on, int h10, int h1, int m10, int m1, int ico
 	}
 	memset(wbuf, 0, sizeof(wbuf));
 	wdata[0] = (unsigned short)(icon_mask | (colon_on ? icon_bit(2) : 0));
-	wdata[1] = (h10 >= 0 && h10 <= 9) ? tab[h10] : 0;	/* -1 = blank */
-	wdata[2] = (h1  >= 0 && h1  <= 9) ? tab[h1]  : 0;
-	wdata[3] = (m10 >= 0 && m10 <= 9) ? tab[m10] : 0;
-	wdata[4] = (m1  >= 0 && m1  <= 9) ? tab[m1]  : 0;
+	wdata[1] = glyph_for(h10);	/* -1 = blank, -2 = dash */
+	wdata[2] = glyph_for(h1);
+	wdata[3] = glyph_for(m10);
+	wdata[4] = glyph_for(m1);
 	for (i = 0; i < 5; i++) {
 		int pos = conf_chars[i];
 		if (pos >= grids) pos = 4 - i;		/* fallback identity */
@@ -558,8 +571,6 @@ static void display_all_segments(int secs)
  *  3) legacy wake_lock signal (Display lock disappears when asleep)      */
 static time_t awake_poll_next = 0;
 static int awake_poll_secs = 2;		/* dumpsys probe cadence, 0 = off */
-static int awake_cached = 1;
-static int awake_probed = 0;
 
 static int fb_blank_asleep(void)
 {
@@ -576,42 +587,76 @@ static int fb_blank_asleep(void)
 static int screen_awake(void)
 {
 	int b = fb_blank_asleep();
+	char buf[4096];
+	int n;
+
 	if (b >= 0) return b ? 0 : 1;
+	/* free per-tick signal: on slimBOX the Display wake lock IS released
+	 * in light sleep (observed via probes); no fork needed */
+	n = read_head("/sys/power/wake_lock", buf, (int)sizeof(buf));
+	if (n > 0 && !strstr(buf, "PowerManagerService.Display"))
+		return 0;				/* Display lock gone: asleep */
+	/* optional fallback probe for firmwares that keep the Display lock:
+	 * explicit opt-in via awake_poll (a short blocking dumpsys per beat) */
 	if (awake_poll_secs > 0 && time(NULL) >= awake_poll_next) {
-		static const char *dumpsys[] = { "/system/bin/dumpsys", "/bin/dumpsys", NULL };
-		char buf[8192];
-		int n = run_capture(dumpsys, "power", NULL, NULL, buf, (int)sizeof(buf));
-		if (n > 0) {
-			awake_probed = 1;
-			awake_cached = !(strstr(buf, "mWakefulness=Asleep") != NULL ||
-				strstr(buf, "mHoldingDisplaySuspendBlocker=false") != NULL);
-		}
+		char pbuf[2048];
+		int r = run_exec(dumpsys_progs, "power", NULL, NULL, pbuf, (int)sizeof(pbuf));
 		awake_poll_next = time(NULL) + awake_poll_secs;
+		if (r > 0)
+			awake_cached = !(strstr(pbuf, "mWakefulness=Asleep") != NULL ||
+				strstr(pbuf, "mHoldingDisplaySuspendBlocker=false") != NULL);
+		if (!awake_cached) return 0;
 	}
-	if (awake_probed) return awake_cached;
-	{
-		char buf[4096];
-		int n = read_head("/sys/power/wake_lock", buf, (int)sizeof(buf));
-		if (n <= 0) return 1;		/* no signal file: assume awake */
-		return strstr(buf, "PowerManagerService.Display") != NULL;
-	}
+	return 1;
 }
 
 static char has_file(const char *p) { return access(p, 0) == 0; }
 
-/* ------ media state sensors (all cheap reads, evaluated ~1/s) ---------- */
+/* ---- media state sensors (all cheap reads, evaluated ~1/s) ------------- */
 
-static int media_pcm_running(void)
+#define AUD_GONE   0	/* no open audio device */
+#define AUD_FROZEN 1	/* open, stream-time frozen (paused/drained) */
+#define AUD_FLOW   2	/* open and advancing */
+
+/* Unified ALSA audio tracker over card0/pcm0p..2p. The per-device "tstamp"
+ * (hardware stream time) ticks every second while flowing; frozen values
+ * or silent states mean the player paused/drained. audio_adv_time keeps a
+ * short afterglow so a pause detected after the player closes the pcm
+ * device still counts. */
+static double pcm_ts_prev[3];
+static int    pcm_ts_seen[3];
+static time_t audio_adv_time = 0;
+
+static int audio_state(void)
 {
 	static const char *devs[] = { "card0/pcm0p", "card0/pcm1p", "card0/pcm2p", NULL };
-	char path[96], buf[48];
-	int i, on = 0, n;
+	int i, flow = 0;
+	time_t now = time(NULL);
+
 	for (i = 0; devs[i] != NULL; i++) {
+		char path[96], buf[256];
+		const char *ts, *cp;
+		int n;
+
 		snprintf(path, sizeof(path), "/proc/asound/%s/sub0/status", devs[i]);
 		n = read_head(path, buf, (int)sizeof(buf));
-		if (n > 0 && strstr(buf, "state: RUNNING")) { on = 1; break; }
+		if (n <= 0 || !strstr(buf, "owner_pid")) { pcm_ts_seen[i] = 0; continue; }
+		if (!strstr(buf, "state: RUNNING")) { pcm_ts_seen[i] = 0; return AUD_FROZEN; }
+		ts = strstr(buf, "tstamp");
+		cp = ts ? strchr(ts, ':') : NULL;
+		if (cp != NULL) {
+			double v = strtod(cp + 1, NULL);
+			if (pcm_ts_seen[i] && v != pcm_ts_prev[i]) {
+				flow = 1;
+				audio_adv_time = now;
+			}
+			pcm_ts_prev[i] = v;
+			pcm_ts_seen[i] = 1;
+		}
 	}
-	return on;
+	if (flow) return AUD_FLOW;
+	if (audio_adv_time != 0 && now - audio_adv_time < 30) return AUD_FROZEN;
+	return AUD_GONE;
 }
 
 static int media_vdec_busy(void)
@@ -633,16 +678,25 @@ static int sensor_play(void)
 {
 	if (!icon_en[IL_PLAY]) return 0;
 	if (play_src_vdec && media_vdec_busy()) return 1;
-	if (play_src_pcm && media_pcm_running()) return 1;
+	if (play_src_pcm && audio_state() == AUD_FLOW) return 1;
 	if (play_src_wakelock && wakelock_playback()) return 1;
 	return 0;
 }
 
 static int sensor_pause(void)
 {
+	static int pause_streak = 0;
+
 	if (!icon_en[IL_PAUSE] || !pause_mode_on) return 0;
-	/* video decoder alive while audio is not flowing => paused (or muted) */
-	return (media_vdec_busy() && !media_pcm_running()) ? 1 : 0;
+	if (!media_vdec_busy()) { pause_streak = 0; return 0; }
+	/* pause = video alive AND its audio (that did flow recently) is no
+	 * longer advancing. Closed-forever devices (muted video) do not count. */
+	{
+		int paused = (audio_state() == AUD_FROZEN);
+		if (paused) pause_streak = 1;
+		else pause_streak = 0;
+	}
+	return pause_streak;
 }
 
 static int sensor_bt(void)
@@ -666,27 +720,29 @@ static int sensor_bt(void)
 	return on;
 }
 
+/* Alarm probe, settings first (cheap), dumpsys alarm as fallback. */
 static void alarm_check(void)
 {
-	char buf[16384];
+	char buf[6144];
 	int n;
 
-	if (alarm_method == 0) { alarm_on = 0; return; }
+	if (alarm_method == 0 || !icon_en[IL_ALARM]) { alarm_on = 0; return; }
+	if (time(NULL) < alarm_next_check) return;
 	if (alarm_method == 1 || alarm_method == 2) {
-		static const char *settings[] = { "/system/bin/settings", "/bin/settings", NULL };
-		n = run_capture(settings, "get", "global", "next_alarm_formatted", buf, 128);
+		n = run_exec(settings_progs, "get", "global", "next_alarm_formatted", buf, 48);
 		if (n > 0 && buf[0] && strncmp(buf, "null", 4) != 0) {
 			alarm_on = 1;
 			alarm_next_check = time(NULL) + alarm_interval;
 			return;
 		}
-		if (alarm_method == 2) { alarm_on = 0; alarm_next_check = time(NULL) + alarm_interval; return; }
+		if (alarm_method == 2) {
+			alarm_on = 0;
+			alarm_next_check = time(NULL) + alarm_interval;
+			return;
+		}
 	}
-	{
-		static const char *dumpsys[] = { "/system/bin/dumpsys", "/bin/dumpsys", NULL };
-		n = run_capture(dumpsys, "alarm", NULL, NULL, buf, (int)sizeof(buf));
-		alarm_on = (n > 0 && strstr(buf, "mNextAlarmClock=AlarmClock")) ? 1 : 0;
-	}
+	n = run_exec(dumpsys_progs, "alarm", NULL, NULL, buf, (int)sizeof(buf));
+	alarm_on = (n > 0 && strstr(buf, "mNextAlarmClock=AlarmClock")) ? 1 : 0;
 	alarm_next_check = time(NULL) + alarm_interval;
 }
 
@@ -846,6 +902,11 @@ static int parse_conf(const char *path)
 			if (awake_poll_secs < 0) awake_poll_secs = 0;
 			if (awake_poll_secs > 60) awake_poll_secs = 60;
 		}
+		else if (!strcmp(k, "sleep_display")) {
+			if (!strncmp(v, "dashes", 6)) sleep_display = 1;
+			else if (!strncmp(v, "blank", 5)) sleep_display = 2;
+			else sleep_display = 0;
+		}
 		else if (!strcmp(k, "icons")) {
 			icon_en[IL_USB]   = strstr(v, "usb")   ? 1 : 0;
 			icon_en[IL_PLAY]  = strstr(v, "play")  ? 1 : 0;
@@ -989,8 +1050,20 @@ int main(int argc, char **argv)
 		int colon, h10, h1, m10, m1;
 		if (awake == 0) {
 			if (last_state != 3) {
-				if (opt_standby == 2) send_brightness((unsigned char)opt_brightness, 1);
-				else if (opt_standby == 1) send_brightness((unsigned char)opt_standby_bright, 0);
+				if (opt_standby == 2) {
+					/* full off: flush icons/colon, kill display */
+					compose_send(0, -1, -1, -1, -1, 0);
+					send_brightness((unsigned char)opt_brightness, 1);
+				} else if (opt_standby == 1) {
+					/* dim: sleep frame + dim level in ONE update so the
+					 * pre-suspend window shows the sleep pattern.
+					 * Status icons are dropped while sleeping. */
+					if (sleep_display == 1)
+						compose_send(1, -2, -2, -2, -2, 0);
+					else if (sleep_display == 2)
+						compose_send(0, -1, -1, -1, -1, 0);
+					send_brightness((unsigned char)opt_standby_bright, 0);
+				}
 				last_state = 3;
 			}
 			for (i = 0; i < 12 && g_running; i++) usleep(250 * 1000);
