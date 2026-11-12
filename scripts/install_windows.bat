@@ -47,9 +47,9 @@ echo == Connecting to %CONNECT% ...
 
 echo == Checking root access ...
 "%ADB%" root >nul 2>&1
-"%ADB%" shell id -u 2>nul | findstr "=0" >nul
+"%ADB%" shell id 2>nul | findstr "=0" >nul
 if errorlevel 1 (
-  "%ADB%" shell "su -c 'id -u'" 2>nul | findstr "=0" >nul
+  "%ADB%" shell "su -c 'id'" 2>nul | findstr "=0" >nul
   if errorlevel 1 (
     echo [ERROR] No root access via ADB.
     echo     How to fix: in the console on the PC run: %ADB% root
