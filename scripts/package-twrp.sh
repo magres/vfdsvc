@@ -7,7 +7,7 @@
 # and reads our ui_print lines from /proc/self/fd/<outfd>.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
-VER="${VFD_VERSION:-0.1.5}"
+VER="$(git -C "$HERE" describe --tags --always 2>/dev/null | sed 's/^v//' || echo dev)"
 OUT="$HERE/dist"
 STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT

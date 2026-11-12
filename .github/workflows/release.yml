@@ -51,6 +51,9 @@ jobs:
       - name: Package release zip
         run: bash scripts/package.sh
 
+      - name: Package TWRP zips
+        run: bash scripts/package-twrp.sh
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
