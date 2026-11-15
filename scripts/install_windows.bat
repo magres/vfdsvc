@@ -13,12 +13,12 @@ echo   Tested on Tanix TX92 (Amlogic S912). Requires root on the firmware.
 echo.
 echo   [1] INSTALL (install on the box + automatic reboot)
 echo   [0] UNINSTALL (rollback/uninstall: restore display to original state)
-echo   [T] TEST (display test: all segments light up for 10 seconds)
+echo   [C] CHECK (diagnostics: root, SoC, GPIO pins, display test 10 sec)
 echo   [Q] EXIT
 echo =====================================================================
-choice /c 10TQ /n /m "= Select action: "
+choice /c 10CQ /n /m "= Select action: "
 if errorlevel 4 goto end
-if errorlevel 3 set ACT=test& goto ip
+if errorlevel 3 set ACT=check& goto ip
 if errorlevel 2 set ACT=uninstall& goto ip
 set ACT=install
 goto ip
@@ -67,16 +67,6 @@ echo == Determining CPU architecture ...
 if not errorlevel 1 ( set BIN=vfdsvc-arm64 ) else ( set BIN=vfdsvc-armv7 )
 echo    using %BIN%
 
-if "%ACT%"=="test" (
-  echo == Display test: all segments and icons light up for 10 seconds ...
-  "%ADB%" shell "stop sys_leds" >nul 2>&1
-  "%ADB%" shell "killall vfdsvc" >nul 2>&1
-  "%ADB%" shell "/data/local/tmp/vfdsvc-installer/vfdsvc -c /system/etc/vfdsvc.conf --test 10"
-  "%ADB%" shell "start sys_leds" >nul 2>&1
-  pause
-  goto end
-)
-
 echo == Uploading files to the box ...
 mkdir "%TEMP%\vfdsvc-payload" 2>nul
 if "%ACT%"=="install" (
@@ -88,6 +78,11 @@ if "%ACT%"=="install" (
 )
 if "%ACT%"=="uninstall" (
   "%ADB%" push scripts\device-uninstall.sh /data/local/tmp/vfdsvc-installer/device-uninstall.sh
+)
+if "%ACT%"=="check" (
+  "%ADB%" push %BIN% /data/local/tmp/vfdsvc-installer/vfdsvc
+  "%ADB%" push conf\tx92-vfd.conf /data/local/tmp/vfdsvc-installer/vfdsvc.conf
+  "%ADB%" push scripts\device-check.sh /data/local/tmp/vfdsvc-installer/device-check.sh
 )
 
 if "%ACT%"=="install" (
@@ -108,6 +103,14 @@ if "%ACT%"=="uninstall" (
     "%ADB%" shell "sh /data/local/tmp/vfdsvc-installer/device-uninstall.sh"
   )
   "%ADB%" reboot
+)
+if "%ACT%"=="check" (
+  echo == Running hardware check on the box ...
+  if "%SU%"=="su" (
+    "%ADB%" shell "su -c 'sh /data/local/tmp/vfdsvc-installer/device-check.sh'"
+  ) else (
+    "%ADB%" shell "sh /data/local/tmp/vfdsvc-installer/device-check.sh"
+  )
 )
 
 echo.

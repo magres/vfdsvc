@@ -86,6 +86,9 @@ while [ "$tries" -lt 30 ]; do
 	ok=1
 	for key in vfd_gpio_clk vfd_gpio_dat vfd_gpio_stb; do
 		n=$(sysfs_num_key "$key") || { ok=0; break; }
+		# drop a leftover export from a killed daemon first, otherwise
+		# export keeps failing with EBUSY and the loop never converges
+		echo "$n" > /sys/class/gpio/unexport 2>/dev/null
 		echo "$n" > /sys/class/gpio/export 2>/dev/null || { ok=0; break; }
 		echo "$n" > /sys/class/gpio/unexport 2>/dev/null
 	done
