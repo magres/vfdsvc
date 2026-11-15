@@ -14,7 +14,9 @@ cp scripts/sys_leds scripts/device-install.sh scripts/device-uninstall.sh script
 cp scripts/install_windows.bat "$STAGE/"
 cp -r conf tooling "$STAGE/"
 cp README.md LICENSE "$STAGE/"
-
+# adb ships under Apache-2.0 (see tooling/NOTICE.md); a copy at the zip root
+# keeps the redistribution notice next to the project's own LICENSE
+cp tooling/NOTICE.md "$STAGE/THIRD-PARTY-NOTICE.md" 2>/dev/null || true
 # adb binaries are optional at packaging time (CI fetches them; local zip
 # without tooling falls back to system adb)
 find "$STAGE/tooling" -type f \( -name 'adb' -o -name 'adb.exe' -o -name '*.dll' \) | while read -r f; do
