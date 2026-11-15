@@ -51,6 +51,22 @@ jobs:
       - name: Package release zip
         run: bash scripts/package.sh
 
+      - name: Verify release zip contents against the installer
+        run: |
+          Z=$(ls dist/*.zip | grep -v twrp | head -1)
+          rm -rf /tmp/vzip && mkdir -p /tmp/vzip
+          unzip -q "$Z" -d /tmp/vzip
+          # every payload path the installer .bat pushes must exist in the
+          # archive (0.1.8 shipped without scripts/device-check.sh)
+          for f in $(grep -oE 'push [^ ]+' scripts/install_windows.bat |
+                     sed 's/^push //' | sort -u); do
+            case "$f" in %BIN%) continue ;; esac
+            f=${f//\\//}   # .bat uses backslashes, the zip uses forward ones
+            test -e "/tmp/vzip/$f" || { echo "ZIP-MISSING: $f"; exit 1; }
+          done
+          test -f /tmp/vzip/scripts/device-check.sh
+          echo ZIP-VERIFY-OK
+
       - name: Package TWRP zips
         run: bash scripts/package-twrp.sh
 
